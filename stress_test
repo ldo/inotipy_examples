@@ -25,6 +25,7 @@
 
 import sys
 import os
+import math
 import time
 import threading
 import tempfile
@@ -146,9 +147,7 @@ if lifetime == None :
 if totalfiles == None :
     raise getopt.GetoptError("forgot to specify --totalfiles=«totalfiles»")
 #end if
-if totalfiles > 999999 :
-    raise getopt.GetoptError("can’t handle more than 6 digits for now")
-#end if
+nr_digits = math.ceil(math.log10(totalfiles + 1))
 if max_queue == None :
     if min_queue == None :
         min_queue = 10
@@ -237,7 +236,7 @@ async def creator() :
                 ) :
                     break
                 created += 1
-                filename = "%06d.jnk" % created
+                filename = "%%0%dd.jnk" % nr_digits % created
                 in_progress.append \
                   (
                     (
