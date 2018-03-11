@@ -1,0 +1,317 @@
+#!/usr/bin/python3
+#+
+# inotipy example: try creating and deleting lots of files in a temporary
+# directory, and see if all the events get correctly reported. Invoke
+# this script as follows:
+#
+#    stress_test --lifetime=«lifetime» [--maxrate=«maxrate»] \
+#        --totalfiles=«totalfiles» [--verbose]
+#
+# where «lifetime» is how many seconds each file should exist before
+# being deleted (fractions allowed), «totalfiles» is how many files in
+# total to create, and «maxrate» is the maximum number of files to create
+# per second (if omitted, they are created as fast as possible).
+# At the end of the run, the number of creation, deletion and overflow
+# events are reported: ideally the first two should equal «totalfiles»
+# and the last one should be zero. But if things happen too fast,
+# creation/deletion events will be missed and overflows will be reported
+# instead.
+#
+# Copyright 2018 by Lawrence D'Oliveiro <ldo@geek-central.gen.nz>. This
+# script is licensed CC0
+# <https://creativecommons.org/publicdomain/zero/1.0/>; do with it
+# what you will.
+#-
+
+import sys
+import os
+import time
+import threading
+import tempfile
+#import shutil
+import asyncio
+import getopt
+import inotify
+from inotify import \
+    IN, \
+    EVENT_BIT
+
+#+
+# Useful stuff
+#-
+
+def call_blocking_async(func, funcargs = (), timeout = None, abort = None, loop = None) :
+    "invokes func on a separate temporary thread and returns a Future that" \
+    " waits either for it to complete (and returns its result) or the timeout" \
+    " (in seconds) to elapse, in which case it raises a TimeoutError exception" \
+    " (if not specified, the timeout is infinite). This allows easy invocation" \
+    " of blocking I/O functions in an asyncio-compatible fashion. But note that" \
+    " the operation cannot be cancelled if the timeout elapses; instead, you can" \
+    " specify an abort callback which will be invoked with whatever result is" \
+    " eventually returned from func."
+
+    if loop == None :
+        loop = asyncio.get_event_loop()
+    #end if
+
+    awaiting = loop.create_future()
+    timeout_task = None
+
+    async def func_done(result) :
+        if not awaiting.done() :
+            awaiting.set_result(result)
+            if timeout_task != None :
+                timeout_task.cancel()
+            #end if
+        else :
+            if abort != None :
+                abort(result)
+            #end if
+        #end if
+    #end func_done
+
+    def do_func_timedout() :
+        if not awaiting.done() :
+            awaiting.set_exception(TimeoutError())
+            # Python doesn’t give me any (easy) way to cancel the thread running the
+            # do_func() call, so just let it run to completion, whereupon func_done()
+            # will get rid of the result. Even if I could delete the thread, can I be sure
+            # that would clean up memory and OS/library resources properly?
+        #end if
+    #end do_func_timedout
+
+    def do_func() :
+        # makes the blocking call on a separate thread.
+        result = func(*funcargs)
+        # A Future is not itself threadsafe, but I can thread-safely
+        # create a coroutine on the main thread to set it.
+        asyncio.run_coroutine_threadsafe(func_done(result), loop)
+    #end do_func
+
+#begin call_blocking_async
+    subthread = threading.Thread(target = do_func)
+    subthread.start()
+    if timeout != None :
+        timeout_task = loop.call_later(timeout, do_func_timedout)
+    #end if
+    return \
+        awaiting
+#end call_blocking_async
+
+#+
+# Mainline
+#-
+
+loop = asyncio.get_event_loop()
+
+queue_factor = 2
+verbose = False
+totalfiles = None
+min_queue = None
+max_queue = None
+max_rate = None
+lifetime = None
+opts, args = getopt.getopt \
+  (
+    sys.argv[1:],
+    "",
+    ["lifetime=", "maxqueue=", "maxrate=", "minqueue=", "totalfiles=", "verbose"]
+  )
+for keyword, value in opts :
+    if keyword == "--lifetime" :
+        lifetime = float(value)
+        assert lifetime > 0
+    elif keyword == "--maxqueue" :
+        max_queue = int(value)
+        assert max_queue > 0
+    elif keyword == "--maxrate" :
+        max_rate = float(value)
+        assert max_rate > 0
+    elif keyword == "--minqueue" :
+        min_queue = int(value)
+        assert min_queue > 0
+    elif keyword == "--totalfiles" :
+        totalfiles = int(value)
+        assert totalfiles > 0
+    elif keyword == "--verbose" :
+        verbose = True
+    #end if
+#end for
+if len(args) != 0 :
+    raise getopt.GetoptError("not expecting any args")
+#end if
+if lifetime == None :
+    raise getopt.GetoptError("forgot to specify --lifetime=«lifetime»")
+#end if
+if totalfiles == None :
+    raise getopt.GetoptError("forgot to specify --totalfiles=«totalfiles»")
+#end if
+if totalfiles > 999999 :
+    raise getopt.GetoptError("can’t handle more than 6 digits for now")
+#end if
+if max_queue == None :
+    if min_queue == None :
+        min_queue = 10
+    #end if
+    max_queue = min_queue * queue_factor
+elif min_queue == None :
+    min_queue = max(round(max_queue / queue_factor), 1)
+elif min_queue < max_queue :
+    raise getopt.GetoptError("--min-queue value must not be less than --max-queue value")
+#end if
+
+tempdir = tempfile.mkdtemp(prefix = "inotipy-stress-test-")
+
+creator_done = False
+
+async def creator() :
+    "does all the file creations and deletions."
+
+    def create_file(filename) :
+        open(os.path.join(tempdir, filename), "wb").close() # just create empty file
+    #end create_file
+
+    def delete_file(filename) :
+        os.unlink(os.path.join(tempdir, filename))
+    #end delete_file
+
+#begin creator
+    global creator_done
+    created = 0
+    deleted = 0
+    in_progress = []
+    to_delete = []
+    if max_rate != None :
+        min_interval = 1 / max_rate # minimum interval between file creations
+        last_create = None
+    else :
+        min_interval = None
+    #end if
+    while True :
+        awaiting = None
+        now = time.time()
+        while True :
+            if len(in_progress) == 0 :
+                break
+            awaiting, filename, creating = in_progress[0]
+            if not awaiting.done() :
+                break
+            in_progress.pop(0)
+            if creating :
+                to_delete.append((filename, now + lifetime))
+            #end if
+        #end while
+        if (
+                len(in_progress) < min_queue
+            and
+                (created < totalfiles or deleted < totalfiles or len(to_delete) != 0)
+        ) :
+            # can start more operations
+            now = time.time()
+            while len(to_delete) != 0 and to_delete[0][1] <= now and len(in_progress) < max_queue :
+                filename = to_delete.pop(0)[0]
+                in_progress.append \
+                  (
+                    (
+                        call_blocking_async
+                          (
+                            func = delete_file,
+                            funcargs = (filename,),
+                            loop = loop
+                          ),
+                        filename,
+                        False,
+                    )
+                  )
+                deleted += 1
+            #end while
+            while True :
+                if created == totalfiles or len(in_progress) >= max_queue :
+                    break
+                if (
+                        min_interval != None
+                    and
+                        last_create != None
+                    and
+                        now - last_create < min_interval
+                ) :
+                    break
+                created += 1
+                filename = "%06d.jnk" % created
+                in_progress.append \
+                  (
+                    (
+                        call_blocking_async
+                          (
+                            func = create_file,
+                            funcargs = (filename,),
+                            loop = loop
+                          ),
+                        filename,
+                        True,
+                    )
+                  )
+                if min_interval != None :
+                    last_create = now
+                #end if
+            #end while
+        #end if
+        awaiting = []
+        if len(in_progress) != 0 :
+            awaiting.append(in_progress[0][0])
+        #end if
+        if len(to_delete) != 0 :
+            awaiting.append(asyncio.sleep(max(to_delete[0][1] - time.time(), 0)))
+        #end if
+        if created < totalfiles and min_interval != None and last_create != None :
+            awaiting.append(asyncio.sleep(max(last_create + min_interval - time.time(), 0)))
+        #end if
+        if len(awaiting) != 0 :
+            await asyncio.wait(awaiting, return_when = asyncio.FIRST_COMPLETED)
+        else :
+            assert created == totalfiles and deleted == totalfiles
+            break # all done
+        #end if
+    #end while
+    sys.stdout.write("creator done\n") # debug
+    creator_done = True
+#end creator
+
+async def monitor() :
+    "does the monitoring of inotify events."
+    watcher = inotify.Watcher.create()
+    watcher.watch(tempdir, IN.ALL_EVENTS)
+    loop.create_task(creator())
+    created = 0
+    deleted = 0
+    overflowed = 0
+    while True :
+        event = await watcher.get(1)
+        if event != None :
+            if verbose or event.mask & EVENT_BIT.Q_OVERFLOW.mask != 0 :
+                sys.stdout.write("Got event: %s\n" % repr(event))
+            #end if
+            if event.mask & EVENT_BIT.CREATE.mask != 0 :
+                created += 1
+            #end if
+            if event.mask & EVENT_BIT.DELETE.mask != 0 :
+                deleted += 1
+            #end if
+            if event.mask & EVENT_BIT.Q_OVERFLOW.mask != 0 :
+                overflowed += 1
+            #end if
+        else :
+            if creator_done :
+                break
+            sys.stdout.write("No event.\n")
+        #end if
+    #end while
+    sys.stdout.write("created: %d, deleted: %d, overflowed: %d\n" % (created, deleted, overflowed))
+#end monitor
+
+start_time = time.time()
+loop.run_until_complete(monitor())
+sys.stdout.write("time taken: %.3fs\n" % (time.time() - start_time))
+
+#shutil.rmtree(tempdir)
+os.rmdir(tempdir) # should be empty
