@@ -1,4 +1,4 @@
-Examples of use of `inotifpy` ([GitLab](https://gitlab.com/ldo/inotipy),
+Examples of use of `inotipy` ([GitLab](https://gitlab.com/ldo/inotipy),
 [GitHub](https://github.com/ldo/inotipy)), my Python binding for the Linux
 inotify(7) API.
 
