@@ -106,6 +106,7 @@ def call_blocking_async(func, funcargs = (), timeout = None, abort = None, loop 
 loop = asyncio.get_event_loop()
 
 queue_factor = 2
+progress_interval = 2
 verbose = False
 totalfiles = None
 min_queue = None
@@ -160,8 +161,9 @@ elif min_queue < max_queue :
 #end if
 
 tempdir = tempfile.mkdtemp(prefix = "inotipy-stress-test-")
-
-creator_done = False
+from_parent, to_child = os.pipe()
+child_pid = None
+creator_done = None
 
 async def creator() :
     "does all the file creations and deletions."
@@ -174,10 +176,18 @@ async def creator() :
         os.unlink(os.path.join(tempdir, filename))
     #end delete_file
 
-#begin creator
-    global creator_done
     created = 0
     deleted = 0
+
+    async def progress() :
+        while True :
+            sys.stdout.write("cre/del/total: %d/%d/%d\n" % (created, deleted, totalfiles))
+            sys.stdout.flush()
+            await asyncio.sleep(progress_interval)
+        #end while
+    #end progress
+
+#begin creator
     in_progress = []
     to_delete = []
     if max_rate != None :
@@ -186,6 +196,15 @@ async def creator() :
     else :
         min_interval = None
     #end if
+    sys.stdout.write("child starting\n") # debug
+    await call_blocking_async \
+      (
+        func = os.read,
+        funcargs = (from_parent, 1),
+        loop = loop
+      ) # wait for parent to be ready for me to start
+    sys.stdout.write("child is go\n") # debug
+    progress_task = loop.create_task(progress())
     while True :
         awaiting = None
         now = time.time()
@@ -272,20 +291,41 @@ async def creator() :
             break # all done
         #end if
     #end while
+    progress_task.cancel()
+    loop.stop()
     sys.stdout.write("creator done\n") # debug
-    creator_done = True
 #end creator
 
 async def monitor() :
     "does the monitoring of inotify events."
-    watcher = inotify.Watcher.create()
-    watcher.watch(tempdir, IN.ALL_EVENTS)
-    loop.create_task(creator())
+
     created = 0
     deleted = 0
     overflowed = 0
+
+    async def progress() :
+        while True :
+            sys.stdout.write("evt cre/del/ovf/total: %d/%d/%d/%d\n" % (created, deleted, overflowed, totalfiles))
+            sys.stdout.flush()
+            await asyncio.sleep(progress_interval)
+        #end while
+    #end progress
+
+#begin monitor
+    watcher = inotify.Watcher.create()
+    watcher.watch(tempdir, IN.ALL_EVENTS)
+    sys.stdout.write("parent starting\n") # debug
+    await call_blocking_async \
+      (
+        func = os.write,
+        funcargs = (to_child, b"\002"),
+        loop = loop
+      )
+    sys.stdout.write("parent told child to go\n") # debug
+    progress_task = loop.create_task(progress())
+    start_time = time.time()
     while True :
-        event = await watcher.get(1)
+        event = await watcher.get(2)
         if event != None :
             if verbose or event.mask & EVENT_BIT.Q_OVERFLOW.mask != 0 :
                 sys.stdout.write("Got event: %s\n" % repr(event))
@@ -300,17 +340,43 @@ async def monitor() :
                 overflowed += 1
             #end if
         else :
-            if creator_done :
+            if creator_done.done() :
                 break
             sys.stdout.write("No event.\n")
         #end if
     #end while
-    sys.stdout.write("created: %d, deleted: %d, overflowed: %d\n" % (created, deleted, overflowed))
+    progress_task.cancel()
+    loop.stop()
+    sys.stdout.write("time taken: %.3fs\n" % (time.time() - start_time))
+    sys.stdout.write("events received: created: %d, deleted: %d, overflowed: %d\n" % (created, deleted, overflowed))
 #end monitor
 
-start_time = time.time()
-loop.run_until_complete(monitor())
-sys.stdout.write("time taken: %.3fs\n" % (time.time() - start_time))
+def mainline() :
+    global from_parent, to_child, child_pid, creator_done
+    child_pid = os.fork()
+    if child_pid != 0 :
+        # I’m the parent
+        os.close(from_parent)
+        del from_parent
+        creator_done = call_blocking_async \
+          (
+            func = os.waitid,
+            funcargs = (os.P_PID, child_pid, os.WEXITED),
+            loop = loop
+          )
+        loop.create_task(monitor())
+    else :
+        # I’m the child
+        os.close(to_child)
+        del to_child
+        loop.create_task(creator())
+    #end if
+#end mainline
 
-#shutil.rmtree(tempdir)
-os.rmdir(tempdir) # should be empty
+mainline()
+loop.run_forever()
+
+if child_pid != 0 :
+    #shutil.rmtree(tempdir)
+    os.rmdir(tempdir) # should be empty
+#end if
