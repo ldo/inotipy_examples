@@ -5,17 +5,21 @@
 # this script as follows:
 #
 #    stress_test --lifetime=«lifetime» [--maxrate=«maxrate»] \
-#        --totalfiles=«totalfiles» [--verbose]
+#        [--processes=«nr_processes»] --totalfiles=«totalfiles» [--verbose]
 #
 # where «lifetime» is how many seconds each file should exist before
 # being deleted (fractions allowed), «totalfiles» is how many files in
-# total to create, and «maxrate» is the maximum number of files to create
-# per second (if omitted, they are created as fast as possible).
+# total to create, «maxrate» is the maximum number of files to create
+# per second (if omitted, they are created as fast as possible), and
+# «nr_processes» is how many concurrent child processes to run to perform
+# the file creations and deletions (if omitted, the default is 1).
+#
 # At the end of the run, the number of creation, deletion and overflow
 # events are reported: ideally the first two should equal «totalfiles»
 # and the last one should be zero. But if things happen too fast,
 # creation/deletion events will be missed and overflows will be reported
-# instead.
+# instead. The best way to create such an overload condition is to
+# run multiple child processes.
 #
 # Copyright 2018 by Lawrence D'Oliveiro <ldo@geek-central.gen.nz>. This
 # script is licensed CC0
@@ -27,6 +31,8 @@ import sys
 import os
 import math
 import time
+import ctypes as ct
+import multiprocessing
 import threading
 import tempfile
 #import shutil
@@ -103,11 +109,26 @@ def call_blocking_async(func, funcargs = (), timeout = None, abort = None, loop 
 # Mainline
 #-
 
+class Counter(ct.Structure) :
+    "shared-memory structure for communicating with child processes."
+    _fields_ = \
+        [
+          # from parent to child:
+            ("step", ct.c_uint), # step between filename indexes
+            ("total", ct.c_uint), # how many files to create & delete
+            ("create_index", ct.c_uint), # starting filename index
+          # from child to parent:
+            ("created", ct.c_uint), # how many created so far
+            ("deleted", ct.c_uint), # how many deleted so far
+        ]
+#end Counter
+
 loop = asyncio.get_event_loop()
 
 queue_factor = 2
 progress_interval = 2
 verbose = False
+nr_processes = 1
 totalfiles = None
 min_queue = None
 max_queue = None
@@ -117,7 +138,7 @@ opts, args = getopt.getopt \
   (
     sys.argv[1:],
     "",
-    ["lifetime=", "maxqueue=", "maxrate=", "minqueue=", "totalfiles=", "verbose"]
+    ["lifetime=", "maxqueue=", "maxrate=", "minqueue=", "processes=", "totalfiles=", "verbose"]
   )
 for keyword, value in opts :
     if keyword == "--lifetime" :
@@ -132,6 +153,9 @@ for keyword, value in opts :
     elif keyword == "--minqueue" :
         min_queue = int(value)
         assert min_queue > 0
+    elif keyword == "--processes" :
+        nr_processes = int(value)
+        assert nr_processes > 0
     elif keyword == "--totalfiles" :
         totalfiles = int(value)
         assert totalfiles > 0
@@ -161,26 +185,182 @@ elif min_queue < max_queue :
 #end if
 
 tempdir = tempfile.mkdtemp(prefix = "inotipy-stress-test-")
-from_parent, to_child = os.pipe()
-child_pid = None
-creator_done = None
+
+def create_file(filename) :
+    open(os.path.join(tempdir, filename), "wb").close() # just create empty file
+#end create_file
+
+def delete_file(filename) :
+    os.unlink(os.path.join(tempdir, filename))
+#end delete_file
+
+counters = multiprocessing.Array(Counter, nr_processes, lock = False)
+triggers = list(multiprocessing.Event() for i in range(nr_processes))
+
+def subprocess_main(index) :
+    "mainline for child process."
+
+    if max_rate != None :
+        min_interval = 1 / max_rate # minimum interval between file creations
+        last_create = None
+    else :
+        min_interval = None
+    #end if
+
+    async def subprocess_task() :
+        "main task that runs in child process event loop."
+        counter = counters[index]
+        in_progress = []
+        to_delete = []
+        while True :
+            awaiting = None
+            now = time.time()
+            while True :
+                if len(in_progress) == 0 :
+                    break
+                awaiting, filename, creating = in_progress[0]
+                if not awaiting.done() :
+                    break
+                in_progress.pop(0)
+                if creating :
+                    to_delete.append((filename, now + lifetime))
+                #end if
+            #end while
+            if (
+                    len(in_progress) < min_queue
+                and
+                    (
+                        counter.created < counter.total
+                    or
+                        counter.deleted < counter.total
+                    or
+                        len(to_delete) != 0
+                    )
+            ) :
+                # can start more operations
+                now = time.time()
+                while \
+                  (
+                        len(to_delete) != 0
+                    and
+                        to_delete[0][1] <= now
+                    and
+                        len(in_progress) < max_queue
+                  ) :
+                    filename = to_delete.pop(0)[0]
+                    in_progress.append \
+                      (
+                        (
+                            call_blocking_async
+                              (
+                                func = delete_file,
+                                funcargs = (filename,),
+                                loop = loop
+                              ),
+                            filename,
+                            False,
+                        )
+                      )
+                    counter.deleted += 1
+                #end while
+                while True :
+                    if counter.created == counter.total or len(in_progress) >= max_queue :
+                        break
+                    if (
+                            min_interval != None
+                        and
+                            last_create != None
+                        and
+                            now - last_create < min_interval
+                    ) :
+                        break
+                    counter.created += 1
+                    filename = "%%0%dd.jnk" % nr_digits % counter.create_index
+                    counter.create_index += counter.step
+                    in_progress.append \
+                      (
+                        (
+                            call_blocking_async
+                              (
+                                func = create_file,
+                                funcargs = (filename,),
+                                loop = loop
+                              ),
+                            filename,
+                            True,
+                        )
+                      )
+                    if min_interval != None :
+                        last_create = now
+                    #end if
+                #end while
+            #end if
+            awaiting = []
+            if len(in_progress) != 0 :
+                awaiting.append(in_progress[0][0])
+            #end if
+            if len(to_delete) != 0 :
+                awaiting.append(asyncio.sleep(max(to_delete[0][1] - time.time(), 0)))
+            #end if
+            if counter.created < counter.total and min_interval != None and last_create != None :
+                awaiting.append(asyncio.sleep(max(last_create + min_interval - time.time(), 0)))
+            #end if
+            if len(awaiting) != 0 :
+                await asyncio.wait(awaiting, return_when = asyncio.FIRST_COMPLETED)
+            else :
+                assert counter.created == counter.total and counter.deleted == counter.total
+                break # all done
+            #end if
+        #end while
+    #end subprocess_task
+
+#begin subprocess_main
+    sys.stdout.write("child %d/%d starting\n" % (index + 1, nr_processes)) # debug
+    triggers[index].wait()
+    sys.stdout.write("child %d/%d is go\n" % (index + 1, nr_processes)) # debug
+    loop.run_until_complete(subprocess_task())
+    sys.stdout.write("child %d/%d finishing\n" % (index + 1, nr_processes)) # debug
+#end subprocess_main
+
+# Note that I avoid creating coroutines on the various process event loops until
+# children have been forked. Not sure how important this is, but just to be safe.
+
+def init_subprocesses() :
+    global processes
+    per_process = totalfiles // nr_processes
+    per_process = (per_process + totalfiles % nr_processes, per_process)
+      # give remainder to first process
+    for i in range(nr_processes) :
+        counter = counters[i]
+        counter.step = nr_processes
+        counter.total = per_process[i != 0]
+        counter.create_index = i + 1
+        counter.created = 0
+        counter.deleted = 0
+    #end for
+    processes = list \
+      (
+        multiprocessing.Process(target = subprocess_main, args = (i,))
+        for i in range(nr_processes)
+      )
+    for proc in processes :
+        proc.start() # start your engines ...
+    #end for
+#end init_subprocesses
+
+init_subprocesses()
 
 async def creator() :
-    "does all the file creations and deletions."
-
-    def create_file(filename) :
-        open(os.path.join(tempdir, filename), "wb").close() # just create empty file
-    #end create_file
-
-    def delete_file(filename) :
-        os.unlink(os.path.join(tempdir, filename))
-    #end delete_file
-
-    created = 0
-    deleted = 0
+    "manages all the file creations and deletions."
 
     async def progress() :
         while True :
+            created = 0
+            deleted = 0
+            for elt in counters :
+                created += elt.created
+                deleted += elt.deleted
+            #end for
             sys.stdout.write("cre/del/total: %d/%d/%d\n" % (created, deleted, totalfiles))
             sys.stdout.flush()
             await asyncio.sleep(progress_interval)
@@ -188,111 +368,21 @@ async def creator() :
     #end progress
 
 #begin creator
-    in_progress = []
-    to_delete = []
-    if max_rate != None :
-        min_interval = 1 / max_rate # minimum interval between file creations
-        last_create = None
-    else :
-        min_interval = None
-    #end if
-    sys.stdout.write("child starting\n") # debug
-    await call_blocking_async \
+    processes_done = list \
       (
-        func = os.read,
-        funcargs = (from_parent, 1),
-        loop = loop
-      ) # wait for parent to be ready for me to start
-    sys.stdout.write("child is go\n") # debug
+        call_blocking_async
+          (
+            func = lambda proc : proc.join(),
+            funcargs = (proc,),
+            loop = loop
+          )
+        for proc in processes
+      )
     progress_task = loop.create_task(progress())
-    while True :
-        awaiting = None
-        now = time.time()
-        while True :
-            if len(in_progress) == 0 :
-                break
-            awaiting, filename, creating = in_progress[0]
-            if not awaiting.done() :
-                break
-            in_progress.pop(0)
-            if creating :
-                to_delete.append((filename, now + lifetime))
-            #end if
-        #end while
-        if (
-                len(in_progress) < min_queue
-            and
-                (created < totalfiles or deleted < totalfiles or len(to_delete) != 0)
-        ) :
-            # can start more operations
-            now = time.time()
-            while len(to_delete) != 0 and to_delete[0][1] <= now and len(in_progress) < max_queue :
-                filename = to_delete.pop(0)[0]
-                in_progress.append \
-                  (
-                    (
-                        call_blocking_async
-                          (
-                            func = delete_file,
-                            funcargs = (filename,),
-                            loop = loop
-                          ),
-                        filename,
-                        False,
-                    )
-                  )
-                deleted += 1
-            #end while
-            while True :
-                if created == totalfiles or len(in_progress) >= max_queue :
-                    break
-                if (
-                        min_interval != None
-                    and
-                        last_create != None
-                    and
-                        now - last_create < min_interval
-                ) :
-                    break
-                created += 1
-                filename = "%%0%dd.jnk" % nr_digits % created
-                in_progress.append \
-                  (
-                    (
-                        call_blocking_async
-                          (
-                            func = create_file,
-                            funcargs = (filename,),
-                            loop = loop
-                          ),
-                        filename,
-                        True,
-                    )
-                  )
-                if min_interval != None :
-                    last_create = now
-                #end if
-            #end while
-        #end if
-        awaiting = []
-        if len(in_progress) != 0 :
-            awaiting.append(in_progress[0][0])
-        #end if
-        if len(to_delete) != 0 :
-            awaiting.append(asyncio.sleep(max(to_delete[0][1] - time.time(), 0)))
-        #end if
-        if created < totalfiles and min_interval != None and last_create != None :
-            awaiting.append(asyncio.sleep(max(last_create + min_interval - time.time(), 0)))
-        #end if
-        if len(awaiting) != 0 :
-            await asyncio.wait(awaiting, return_when = asyncio.FIRST_COMPLETED)
-        else :
-            assert created == totalfiles and deleted == totalfiles
-            break # all done
-        #end if
+    while sum(proc.exitcode == None for proc in processes) != 0 :
+        await asyncio.wait(processes_done, return_when = asyncio.FIRST_COMPLETED)
     #end while
     progress_task.cancel()
-    loop.stop()
     sys.stdout.write("creator done\n") # debug
 #end creator
 
@@ -314,14 +404,11 @@ async def monitor() :
 #begin monitor
     watcher = inotify.Watcher.create()
     watcher.watch(tempdir, IN.ALL_EVENTS)
-    sys.stdout.write("parent starting\n") # debug
-    await call_blocking_async \
-      (
-        func = os.write,
-        funcargs = (to_child, b"\002"),
-        loop = loop
-      )
-    sys.stdout.write("parent told child to go\n") # debug
+    sys.stdout.write("monitor starting\n") # debug
+    for trig in triggers :
+        trig.set() # ... and they’re off
+    #end for
+    sys.stdout.write("parent told children to go\n") # debug
     progress_task = loop.create_task(progress())
     start_time = time.time()
     while True :
@@ -340,43 +427,23 @@ async def monitor() :
                 overflowed += 1
             #end if
         else :
-            if creator_done.done() :
+            if creator_task.done() :
                 break
             sys.stdout.write("No event.\n")
         #end if
     #end while
     progress_task.cancel()
-    loop.stop()
     sys.stdout.write("time taken: %.3fs\n" % (time.time() - start_time))
-    sys.stdout.write("events received: created: %d, deleted: %d, overflowed: %d\n" % (created, deleted, overflowed))
+    sys.stdout.write \
+      (
+            "events received: created: %d, deleted: %d, overflowed: %d\n"
+        %
+            (created, deleted, overflowed)
+      )
 #end monitor
 
-def mainline() :
-    global from_parent, to_child, child_pid, creator_done
-    child_pid = os.fork()
-    if child_pid != 0 :
-        # I’m the parent
-        os.close(from_parent)
-        del from_parent
-        creator_done = call_blocking_async \
-          (
-            func = os.waitid,
-            funcargs = (os.P_PID, child_pid, os.WEXITED),
-            loop = loop
-          )
-        loop.create_task(monitor())
-    else :
-        # I’m the child
-        os.close(to_child)
-        del to_child
-        loop.create_task(creator())
-    #end if
-#end mainline
+creator_task = loop.create_task(creator())
+loop.run_until_complete(monitor())
 
-mainline()
-loop.run_forever()
-
-if child_pid != 0 :
-    #shutil.rmtree(tempdir)
-    os.rmdir(tempdir) # should be empty
-#end if
+#shutil.rmtree(tempdir)
+os.rmdir(tempdir) # should be empty
