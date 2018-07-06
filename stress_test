@@ -21,6 +21,13 @@
 # instead. The best way to create such an overload condition is to
 # run multiple child processes.
 #
+# For example, an invocation like this
+#
+#     stress_test --lifetime=0.1 --totalfiles=100000 --processes=10
+#
+# runs for less than 15 seconds, but puts sufficient load on my system
+# to lead to overflows during the run.
+#
 # Copyright 2018 by Lawrence D'Oliveiro <ldo@geek-central.gen.nz>. This
 # script is licensed CC0
 # <https://creativecommons.org/publicdomain/zero/1.0/>; do with it
