@@ -379,9 +379,7 @@ async def creator() :
         for proc in processes
       )
     progress_task = loop.create_task(progress())
-    while sum(proc.exitcode == None for proc in processes) != 0 :
-        await asyncio.wait(processes_done, return_when = asyncio.FIRST_COMPLETED)
-    #end while
+    await asyncio.wait(processes_done, return_when = asyncio.ALL_COMPLETED)
     progress_task.cancel()
     sys.stdout.write("creator done\n") # debug
 #end creator
