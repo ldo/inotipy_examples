@@ -208,7 +208,7 @@ def subprocess_main(index) :
     "mainline for child process."
 
     if max_rate != None :
-        min_interval = 1 / max_rate # minimum interval between file creations
+        min_interval = nr_processes / max_rate # minimum interval between file creations
         last_create = None
     else :
         min_interval = None
