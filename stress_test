@@ -361,15 +361,37 @@ async def creator() :
     "manages all the file creations and deletions."
 
     async def progress() :
+        prev_created = None
+        prev_deleted = None
+        prev_time = None
         while True :
+            now = time.time()
             created = 0
             deleted = 0
+            total = 0
             for elt in counters :
                 created += elt.created
                 deleted += elt.deleted
+                total += elt.total
             #end for
-            sys.stdout.write("cre/del/total: %d/%d/%d\n" % (created, deleted, totalfiles))
+            sys.stdout.write("activity cre/del/total: %d/%d/%d" % (created, deleted, total))
+            if prev_created != None :
+                interval = now - prev_time
+                sys.stdout.write \
+                  (
+                        " cre %d/s, del %d/s"
+                    %
+                        (
+                            round((created - prev_created) / interval),
+                            round((deleted - prev_deleted) / interval),
+                        )
+                  )
+            #end if
+            sys.stdout.write("\n")
             sys.stdout.flush()
+            prev_created = created
+            prev_deleted = deleted
+            prev_time = now
             await asyncio.sleep(progress_interval)
         #end while
     #end progress
@@ -399,9 +421,37 @@ async def monitor() :
     overflowed = 0
 
     async def progress() :
+        prev_created = None
+        prev_deleted = None
+        prev_overflowed = None
+        prev_time = None
         while True :
-            sys.stdout.write("evt cre/del/ovf/total: %d/%d/%d/%d\n" % (created, deleted, overflowed, totalfiles))
+            now = time.time()
+            sys.stdout.write \
+              (
+                    "notified cre/del/ovf/total: %d/%d/%d/%d"
+                %
+                    (created, deleted, overflowed, totalfiles)
+              )
+            if prev_created != None :
+                interval = now - prev_time
+                sys.stdout.write \
+                  (
+                        " cre %d/s, del %d/s, ovf %d/s"
+                    %
+                        (
+                            round((created - prev_created) / interval),
+                            round((deleted - prev_deleted) / interval),
+                            round((overflowed - prev_overflowed) / interval),
+                        )
+                  )
+            #end if
+            sys.stdout.write("\n")
             sys.stdout.flush()
+            prev_created = created
+            prev_deleted = deleted
+            prev_overflowed = overflowed
+            prev_time = now
             await asyncio.sleep(progress_interval)
         #end while
     #end progress
