@@ -187,8 +187,8 @@ if max_queue == None :
     max_queue = min_queue * queue_factor
 elif min_queue == None :
     min_queue = max(round(max_queue / queue_factor), 1)
-elif min_queue < max_queue :
-    raise getopt.GetoptError("--min-queue value must not be less than --max-queue value")
+elif max_queue < min_queue :
+    raise getopt.GetoptError("--max-queue value must not be less than --min-queue value")
 #end if
 
 tempdir = tempfile.mkdtemp(prefix = "inotipy-stress-test-")
