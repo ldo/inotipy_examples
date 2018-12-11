@@ -223,6 +223,7 @@ def subprocess_main(index) :
             awaiting = None
             now = time.time()
             while True :
+                # pop in_progress entries that have completed
                 if len(in_progress) == 0 :
                     break
                 awaiting, filename, creating = in_progress[0]
@@ -254,6 +255,7 @@ def subprocess_main(index) :
                     and
                         len(in_progress) < max_queue
                   ) :
+                    # can delete another file
                     filename = to_delete.pop(0)[0]
                     in_progress.append \
                       (
@@ -281,6 +283,7 @@ def subprocess_main(index) :
                             now - last_create < min_interval
                     ) :
                         break
+                    # can create another file
                     counter.created += 1
                     filename = "%%0%dd.jnk" % nr_digits % counter.create_index
                     counter.create_index += counter.step
@@ -333,6 +336,7 @@ def subprocess_main(index) :
 # children have been forked. Not sure how important this is, but just to be safe.
 
 def init_subprocesses() :
+    "creates all the subprocesses that do the actual file creations and deletions."
     global processes
     per_process = totalfiles // nr_processes
     per_process = (per_process + totalfiles % nr_processes, per_process)
@@ -358,9 +362,12 @@ def init_subprocesses() :
 init_subprocesses()
 
 async def creator() :
-    "manages all the file creations and deletions."
+    "gives a running report of all the file creation and deletion counters" \
+    " while waiting for the subprocesses to terminate."
 
     async def progress() :
+        "gives a running report on how many file creations and deletions" \
+        " have actually been done."
         prev_created = None
         prev_deleted = None
         prev_time = None
@@ -414,13 +421,16 @@ async def creator() :
 #end creator
 
 async def monitor() :
-    "does the monitoring of inotify events."
+    "triggers the subprocesses to actually start file operations and" \
+    " does the processing of resulting inotify events."
 
     created = 0
     deleted = 0
     overflowed = 0
 
     async def progress() :
+        "gives a running report on how many file creation and deletion" \
+        " notifications have been received."
         prev_created = None
         prev_deleted = None
         prev_overflowed = None
