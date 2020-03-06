@@ -3,7 +3,7 @@
 # inotipy example: perform dummy “processing” on all items dropped
 # in a watched directory. Invoke this script as follows:
 #
-#     dir_processor «path»
+#     file_eater «path»
 #
 # where «path» is the path of a directory to be created. The directory
 # will be monitored for all items created or dropped in it; the “file”
