@@ -21,6 +21,7 @@ import inotify
 
 loop = asyncio.get_event_loop()
 
+timeout = None
 stop_on_timeout = False
 stop_on = set()
 opts, args = getopt.getopt \
