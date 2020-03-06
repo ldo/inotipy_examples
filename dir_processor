@@ -82,7 +82,7 @@ async def mainline() :
             #end if
             if event.mask & (IN.DELETE | IN.MOVED_FROM) != 0 :
                 sys.stdout.write("gone dir %s\n" % item_path)
-                del pathnames_by_watch[event.watch]
+                del pathnames_by_watch[watches_by_pathname[item_path]]
                 del watches_by_pathname[item_path]
             #end if
         else :
