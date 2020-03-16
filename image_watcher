@@ -85,6 +85,7 @@ children_by_pid = {}
 children_by_path = {}
 
 async def child_gobbler() :
+    "task which reaps terminated children."
     while True :
         await child_pipe.till_readable()
         sys.stderr.write("something in wakeup pipe\n") # debug
@@ -103,6 +104,7 @@ async def child_gobbler() :
 #end child_gobbler
 
 def kill_child_for(item_path) :
+    "kills the child process, if any, displaying the given file."
     if item_path in children_by_path :
         try :
             os.kill(children_by_path[item_path], signal.SIGTERM)
@@ -118,6 +120,7 @@ def kill_child_for(item_path) :
 #end kill_child_for
 
 async def mainline() :
+    "task which actually does the directory watching and spawning of children."
     gobbler = loop.create_task(child_gobbler())
     watcher = inotify.Watcher.create()
     dir_watch_flags = \
@@ -168,7 +171,7 @@ async def mainline() :
                 children_by_path[item_path] = child.pid
                 sys.stderr.write("spawned child %d to show image %s\n" % (child.pid, repr(item_path))) # debug
             elif event.mask & (IN.DELETE | IN.MOVED_FROM) != 0 :
-                sys.stdout.write("gone child %s\n" % item_path)
+                sys.stdout.write("gone file %s\n" % item_path)
                 kill_child_for(item_path)
             #end if
         #end if
