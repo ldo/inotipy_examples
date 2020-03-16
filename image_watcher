@@ -1,0 +1,183 @@
+#!/usr/bin/python3
+#+
+# inotipy example: display image files dropped in a watched
+# directory. Invoke this script as follows:
+#
+#    image_watcher [--watch-subdirs] «path»
+#
+# where «path» is the path of the directory to be watched. Every time
+# a new file appears in this directory, or a subdirectory thereof (if
+# --watch-subdirs is specified), a process is spawned running the
+# “display” command to display that image. Removing the file will
+# close the display window.
+#
+# Copyright 2020 by Lawrence D'Oliveiro <ldo@geek-central.gen.nz>. This
+# script is licensed CC0
+# <https://creativecommons.org/publicdomain/zero/1.0/>; do with it
+# what you will.
+#-
+
+import sys
+import os
+import signal
+import asyncio
+import getopt
+import subprocess
+import inotify
+from inotify import \
+    IN
+
+loop = asyncio.get_event_loop()
+
+#+
+# Useful stuff
+#-
+
+SIGPASS = lambda signum, frame : None
+  # signal handler which does nothing but lets signal be enabled
+
+class Pipe :
+    "convenient encapsulation of some pipe functionality."
+
+    def __init__(self) :
+        self.read_end, self.write_end = os.pipe()
+    #end __init__
+
+    async def till_readable(self) :
+        "for waiting until something can be read from read_end."
+        awaiting = loop.create_future()
+        loop.add_reader(self.read_end, lambda : awaiting.set_result(None))
+        await awaiting
+        loop.remove_reader(self.read_end)
+    #end till_readable
+
+#end Pipe
+
+#+
+# Mainline
+#-
+
+watch_subdirs = False
+opts, args = getopt.getopt \
+  (
+    sys.argv[1:],
+    "",
+    ["watch-subdirs"]
+  )
+for keyword, value in opts :
+    if keyword == "--watch-subdirs" :
+        watch_subdirs = True
+    #end if
+#end for
+if len(args) != 1 :
+    raise getopt.GetoptError("need exactly one arg, the directory to watch")
+#end if
+basedir = args[0]
+
+child_pipe = Pipe()
+os.set_blocking(child_pipe.read_end, False) # probably doesn’t matter
+os.set_blocking(child_pipe.write_end, False) # does matter
+signal.set_wakeup_fd(child_pipe.write_end)
+signal.signal(signal.SIGCHLD, SIGPASS)
+  # read notification from pipe instead
+
+children_by_pid = {}
+children_by_path = {}
+
+async def child_gobbler() :
+    while True :
+        await child_pipe.till_readable()
+        sys.stderr.write("something in wakeup pipe\n") # debug
+        os.read(child_pipe.read_end, 128)
+        while True :
+            pid, status = os.waitpid(-1, os.WNOHANG)
+            if pid == 0 :
+                break
+            sys.stderr.write("termination for pid %d, one of mine %s\n" % (pid, pid in children_by_pid)) # debug
+            if pid in children_by_pid :
+                del children_by_path[children_by_pid[pid]]
+                del children_by_pid[pid]
+            #end if
+        #end while
+    #end while
+#end child_gobbler
+
+def kill_child_for(item_path) :
+    if item_path in children_by_path :
+        try :
+            os.kill(children_by_path[item_path], signal.SIGTERM)
+        except ProcessLookupError :
+            # possible race condition, child process already terminated
+            pass
+        #end try
+        del children_by_pid[children_by_path[item_path]]
+        del children_by_path[item_path]
+    else :
+        sys.stderr.write("kill_child_for: no child for path %s\n" % repr(item_path))
+    #end if
+#end kill_child_for
+
+async def mainline() :
+    gobbler = loop.create_task(child_gobbler())
+    watcher = inotify.Watcher.create()
+    dir_watch_flags = \
+        (IN.CLOSE_WRITE | IN.MOVED_TO | IN.MOVED_FROM | IN.CREATE | IN.DELETE | IN.DELETE_SELF | IN.IGNORED)
+    basedir_watch = watcher.watch(basedir, dir_watch_flags)
+    watches_by_pathname = {basedir : basedir_watch}
+    pathnames_by_watch = {basedir_watch : basedir}
+    while True :
+        event = await watcher.get()
+        item_path = os.path.join(pathnames_by_watch.get(event.watch, ""), event.pathname)
+        # sys.stdout.write("event %s\n" % repr(event)) # debug
+        if event.mask & IN.DELETE_SELF != 0 :
+            if event.watch == basedir_watch :
+                sys.stdout.write("base dir %s gone\n" % item_path)
+                break
+            #end if
+        elif event.mask & IN.ISDIR != 0 :
+            if watch_subdirs :
+                if event.mask & (IN.CREATE | IN.MOVED_TO) != 0 :
+                    sys.stdout.write("new dir %s\n" % item_path)
+                    subwatch = watcher.watch(item_path, dir_watch_flags)
+                    watches_by_pathname[item_path] = subwatch
+                    pathnames_by_watch[subwatch] = item_path
+                #end if
+                if event.mask & (IN.DELETE | IN.MOVED_FROM) != 0 :
+                    sys.stdout.write("gone dir %s\n" % item_path)
+                    del pathnames_by_watch[watches_by_pathname[item_path]]
+                    del watches_by_pathname[item_path]
+                #end if
+            #end if
+        else :
+            # it’s a file
+            # Only process when it has been closed (or moved in its entirety
+            # from elsewhere), not when it is initially created, to give time
+            # for its contents to be written.
+            if event.mask & (IN.CLOSE_WRITE | IN.MOVED_TO) != 0 :
+                if item_path in children_by_path :
+                    # new file with same name as file already being displayed
+                    kill_child_for(item_path)
+                #end if
+                child = subprocess.Popen \
+                  (
+                    args = ("display", item_path),
+                    stdin = subprocess.DEVNULL,
+                    stdout = subprocess.DEVNULL,
+                  )
+                children_by_pid[child.pid] = item_path
+                children_by_path[item_path] = child.pid
+                sys.stderr.write("spawned child %d to show image %s\n" % (child.pid, repr(item_path))) # debug
+            elif event.mask & (IN.DELETE | IN.MOVED_FROM) != 0 :
+                sys.stdout.write("gone child %s\n" % item_path)
+                kill_child_for(item_path)
+            #end if
+        #end if
+    #end while
+    gobbler.cancel()
+#end mainline
+
+try :
+    loop.run_until_complete(mainline())
+except KeyboardInterrupt :
+    pass
+#end try
