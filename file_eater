@@ -62,11 +62,9 @@ async def mainline() :
     dir_watch_flags = \
         (IN.CLOSE_WRITE | IN.MOVED_TO | IN.MOVED_FROM | IN.CREATE | IN.DELETE | IN.DELETE_SELF | IN.IGNORED)
     basedir_watch = watcher.watch(basedir, dir_watch_flags)
-    watches_by_pathname = {basedir : basedir_watch}
-    pathnames_by_watch = {basedir_watch : basedir}
     while True :
         event = await watcher.get()
-        item_path = os.path.join(pathnames_by_watch.get(event.watch, ""), event.pathname)
+        item_path = os.path.join(event.watch.pathname, event.pathname)
         # sys.stdout.write("event %s\n" % repr(event)) # debug
         if event.mask & IN.DELETE_SELF != 0 :
             if event.watch == basedir_watch :
@@ -77,13 +75,9 @@ async def mainline() :
             if event.mask & (IN.CREATE | IN.MOVED_TO) != 0 :
                 sys.stdout.write("new dir %s\n" % item_path)
                 subwatch = watcher.watch(item_path, dir_watch_flags)
-                watches_by_pathname[item_path] = subwatch
-                pathnames_by_watch[subwatch] = item_path
             #end if
             if event.mask & (IN.DELETE | IN.MOVED_FROM) != 0 :
                 sys.stdout.write("gone dir %s\n" % item_path)
-                del pathnames_by_watch[watches_by_pathname[item_path]]
-                del watches_by_pathname[item_path]
             #end if
         else :
             # it’s a file
