@@ -76,5 +76,5 @@ async def mainline() :
 try :
     loop.run_until_complete(mainline())
 except KeyboardInterrupt :
-    pass
+    sys.stdout.write("\n") # ensure shell prompt appears at start of new line
 #end try
