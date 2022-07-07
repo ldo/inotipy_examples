@@ -310,10 +310,10 @@ def subprocess_main(index) :
                 awaiting.append(in_progress[0][0])
             #end if
             if len(to_delete) != 0 :
-                awaiting.append(asyncio.sleep(max(to_delete[0][1] - time.time(), 0)))
+                awaiting.append(loop.create_task(asyncio.sleep(max(to_delete[0][1] - time.time(), 0))))
             #end if
             if counter.created < counter.total and min_interval != None and last_create != None :
-                awaiting.append(asyncio.sleep(max(last_create + min_interval - time.time(), 0)))
+                awaiting.append(loop.create_task(asyncio.sleep(max(last_create + min_interval - time.time(), 0))))
             #end if
             if len(awaiting) != 0 :
                 await asyncio.wait(awaiting, return_when = asyncio.FIRST_COMPLETED)

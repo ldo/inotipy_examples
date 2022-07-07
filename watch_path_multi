@@ -52,7 +52,7 @@ async def watch(path) :
 #end watch
 
 async def mainline() :
-    await asyncio.wait(list(watch(path) for path in args))
+    await asyncio.wait(list(loop.create_task(watch(path)) for path in args))
 #end mainline
 
 loop.run_until_complete(mainline())
