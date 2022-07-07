@@ -24,7 +24,6 @@
 
 import sys
 import os
-import asyncio
 import getopt
 import subprocess
 import atexit
@@ -33,7 +32,7 @@ import inotify
 from inotify import \
     IN
 
-loop = asyncio.get_event_loop()
+loop = inotify.get_event_loop()
 
 opts, args = getopt.getopt \
   (

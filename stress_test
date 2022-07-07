@@ -65,7 +65,7 @@ def call_blocking_async(func, funcargs = (), timeout = None, abort = None, loop 
     " eventually returned from func."
 
     if loop == None :
-        loop = asyncio.get_event_loop()
+        loop = inotify.get_event_loop()
     #end if
 
     awaiting = loop.create_future()
@@ -130,7 +130,7 @@ class Counter(ct.Structure) :
         ]
 #end Counter
 
-loop = asyncio.get_event_loop()
+loop = inotify.get_event_loop()
 
 queue_factor = 2
 progress_interval = 2

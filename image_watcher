@@ -20,14 +20,13 @@
 import sys
 import os
 import signal
-import asyncio
 import getopt
 import subprocess
 import inotify
 from inotify import \
     IN
 
-loop = asyncio.get_event_loop()
+loop = inotify.get_event_loop()
 
 #+
 # Useful stuff

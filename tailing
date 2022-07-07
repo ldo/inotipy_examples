@@ -24,7 +24,6 @@
 
 import sys
 import os
-import asyncio
 import getopt
 import inotify
 from inotify import \
@@ -50,7 +49,7 @@ if len(args) != 1 :
 #end if
 the_file, = args
 
-loop = asyncio.get_event_loop()
+loop = inotify.get_event_loop()
 
 async def mainline() :
     fd = os.open(the_file, os.O_RDONLY)

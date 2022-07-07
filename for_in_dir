@@ -41,7 +41,6 @@ import sys
 import os
 import stat
 import subprocess
-import asyncio
 import getopt
 import inotify
 from inotify import \
@@ -77,7 +76,7 @@ if len(args) < 2 :
 dir = args[0]
 cmd = args[1:]
 
-loop = asyncio.get_event_loop()
+loop = inotify.get_event_loop()
 
 def feed(item) :
     # invokes the command for another item. Ignores anything

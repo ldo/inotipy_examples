@@ -14,11 +14,10 @@
 #-
 
 import sys
-import asyncio
 import getopt
 import inotify
 
-loop = asyncio.get_event_loop()
+loop = inotify.get_event_loop()
 
 timeout = None
 opts, args = getopt.getopt \
