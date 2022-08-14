@@ -59,7 +59,7 @@ atexit.register(del_basedir)
 async def mainline() :
     watcher = inotify.Watcher.create()
     dir_watch_flags = \
-        (IN.CLOSE_WRITE | IN.MOVED_TO | IN.MOVED_FROM | IN.CREATE | IN.DELETE | IN.DELETE_SELF | IN.IGNORED)
+        (IN.CLOSE_WRITE | IN.MOVED_TO | IN.MOVED_FROM | IN.CREATE | IN.DELETE | IN.DELETE_SELF)
     basedir_watch = watcher.watch(basedir, dir_watch_flags)
     while True :
         event = await watcher.get()
