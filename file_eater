@@ -63,34 +63,42 @@ async def mainline() :
     basedir_watch = watcher.watch(basedir, dir_watch_flags)
     while True :
         event = await watcher.get()
-        item_path = os.path.join(event.watch.pathname, event.pathname)
         # sys.stdout.write("event %s\n" % repr(event)) # debug
-        if event.mask & IN.DELETE_SELF != 0 :
-            if event.watch == basedir_watch :
-                sys.stdout.write("base dir %s gone\n" % item_path)
-                break
-            #end if
-        elif event.mask & IN.ISDIR != 0 :
-            if event.mask & (IN.CREATE | IN.MOVED_TO) != 0 :
-                sys.stdout.write("new dir %s\n" % item_path)
-                subwatch = watcher.watch(item_path, dir_watch_flags)
-            #end if
-            if event.mask & (IN.DELETE | IN.MOVED_FROM) != 0 :
-                sys.stdout.write("gone dir %s\n" % item_path)
+        if event.watch != None :
+            item_path = os.path.join(event.watch.pathname, event.pathname)
+            if event.mask & IN.DELETE_SELF != 0 :
+                if event.watch == basedir_watch :
+                    sys.stdout.write("base dir %s gone\n" % item_path)
+                    break
+                #end if
+            elif event.mask & IN.ISDIR != 0 :
+                if event.mask & (IN.CREATE | IN.MOVED_TO) != 0 :
+                    sys.stdout.write("new dir %s\n" % item_path)
+                    subwatch = watcher.watch(item_path, dir_watch_flags)
+                #end if
+                if event.mask & (IN.DELETE | IN.MOVED_FROM) != 0 :
+                    sys.stdout.write("gone dir %s\n" % item_path)
+                #end if
+            else :
+                # it’s a file
+                # Only process when it has been closed (or moved in its entirety
+                # from elsewhere), not when it is initially created, to give time
+                # for its contents to be written.
+                if event.mask & (IN.CLOSE_WRITE | IN.MOVED_TO) != 0 :
+                    sys.stdout.write("new file %s\n" % item_path)
+                    subprocess.check_call \
+                      (
+                        args = ("file", item_path)
+                      )
+                    try :
+                        os.unlink(item_path)
+                    except FileNotFoundError :
+                        pass
+                    #end try
+                #end if
             #end if
         else :
-            # it’s a file
-            # Only process when it has been closed (or moved in its entirety
-            # from elsewhere), not when it is initially created, to give time
-            # for its contents to be written.
-            if event.mask & (IN.CLOSE_WRITE | IN.MOVED_TO) != 0 :
-                sys.stdout.write("new file %s\n" % item_path)
-                subprocess.check_call \
-                  (
-                    args = ("file", item_path)
-                  )
-                os.unlink(item_path)
-            #end if
+            assert event.mask & IN.Q_OVERFLOW != 0
         #end if
     #end while
 #end mainline
